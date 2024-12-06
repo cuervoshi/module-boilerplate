@@ -1,7 +1,7 @@
 import debug from 'debug';
 import { RequestHandler, Router } from 'express';
 import { globSync, Path as gPath } from 'glob';
-import NDK, { NostrEvent } from '@nostr-dev-kit/ndk';
+import NDK, { NDKSubscription, NostrEvent } from '@nostr-dev-kit/ndk';
 import { v4 as uuidv4 } from 'uuid';
 
 import Path from 'path';
@@ -22,8 +22,8 @@ const sAlpha: string =
 const sAlphaLength: bigint = BigInt(sAlpha.length);
 let lastHandledTracker: LastHandledTracker | undefined;
 
-export class EmptyRoutesError extends Error {}
-export class DuplicateRoutesError extends Error {}
+export class EmptyRoutesError extends Error { }
+export class DuplicateRoutesError extends Error { }
 
 const methods: RouteMethod[] = ['get', 'post', 'put', 'patch', 'delete'];
 
@@ -182,6 +182,43 @@ export async function getAllHandlers<
   }
 
   return result;
+}
+
+export function createStaticSubscriptions<Context extends DefaultContext = DefaultContext>(
+  ctx: Context,
+  readNdk: NDK,
+  handlers: {
+    [name: string]: SubHandling<Context>;
+  },
+): NDKSubscription[] {
+  let subscriptions: NDKSubscription[] = [];
+
+  Object.entries(handlers).forEach(
+    ([name, { filter, getHandler }]: [string, SubHandling<Context>]): void => {
+      const lastHandled: number = lastHandledTracker!.get(name);
+      if (lastHandled) {
+        filter.since = lastHandled - CREATED_AT_TOLERANCE;
+      } else {
+        delete filter.since;
+      }
+
+      const subscription = new NDKSubscription(readNdk, filter, { closeOnEose: false, subId: name });
+
+      subscription.on("event", async (nostrEvent: NostrEvent) => {
+        try {
+          await getHandler(ctx, 0)(nostrEvent);
+          lastHandledTracker!.hit(name, nostrEvent.created_at);
+        } catch (e) {
+          warn(`Unexpected exception found when handling ${name}: %O`, e);
+        }
+      })
+
+      subscriptions.push(subscription)
+      log(`Created ${name} subscription`);
+    },
+  );
+
+  return subscriptions;
 }
 
 export function subscribeToAll<Context extends DefaultContext = DefaultContext>(

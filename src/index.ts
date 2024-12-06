@@ -2,17 +2,17 @@ import { Debugger } from 'debug';
 import express, { Application } from 'express';
 import * as middlewares from './lib/middlewares';
 import {
+  createStaticSubscriptions,
   EmptyRoutesError,
   getAllHandlers,
   logger,
   setUpRoutes,
-  subscribeToAll,
 } from './lib/utils';
 import { DefaultContext, ExtendedRequest } from './type/request';
 import 'websocket-polyfill';
 
 import { getReadNDK, getWriteNDK } from './services/ndk';
-import NDK, { NDKRelay } from '@nostr-dev-kit/ndk';
+import NDK, { NDKRelay, NDKSubscription } from '@nostr-dev-kit/ndk';
 import { DirectOutbox } from './services/outbox';
 import morgan from 'morgan';
 import helmet from 'helmet';
@@ -45,7 +45,8 @@ export class Module<Context extends DefaultContext = DefaultContext> {
   readonly restPath: string;
   #server?: Server | undefined;
   #writeNDK: NDK;
-
+  #subscriptions: NDKSubscription[]
+  
   private constructor(config: ModuleConfiguration<Context>) {
     this.nostrPath = config.nostrPath;
     this.port = config.port || 8000;
@@ -54,6 +55,7 @@ export class Module<Context extends DefaultContext = DefaultContext> {
     this.#writeNDK = config.writeNDK || getWriteNDK();
     this.context = config.context;
     this.app = config.expressApp || this.#defaultApp();
+    this.#subscriptions = [];
     Object.seal(this);
   }
 
@@ -97,10 +99,17 @@ export class Module<Context extends DefaultContext = DefaultContext> {
       throw new Error('Error setting up subscriptions');
     }
 
-    log('Subscribing...');
-    subscribeToAll<Context>(this.context, this.#readNDK, allHandlers);
+    this.#subscriptions = createStaticSubscriptions<Context>(this.context, this.#readNDK, allHandlers)
+    //subscribeToAll<Context>(this.context, this.#readNDK, allHandlers);
+
     this.#readNDK.pool.on('relay:connect', (relay: NDKRelay): void => {
       log('Connected to Read Relay %s', relay.url);
+
+      log('Subscribing to %s...', relay.url);
+      this.#subscriptions.map((sub) => {
+        relay.subscribe(sub, sub.filters)
+        log('Subscription %s added ', sub.subId)
+      })
     });
 
     this.#readNDK.pool.on('relay:disconnect', (relay: NDKRelay) => {
